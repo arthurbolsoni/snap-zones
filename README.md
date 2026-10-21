@@ -28,7 +28,7 @@ Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do curs
 - Redimensionar pela borda de cima até o topo da tela (ou pela de baixo até o fim) deixa a janela com a altura toda, mantendo largura e posição; arrastar depois volta à altura de antes.
 - Redimensionar uma janela pela borda lateral leva junto a vizinha que divide a mesma borda (50x50 → 25x75).
 - Janela em tela cheia (jogo, vídeo, F11) fica fora: o app só age em janela em modo janela.
-- Menu do ícone: Pausar, Iniciar com o Windows (valor `snap-zones` em `HKCUSoftwareMicrosoftWindowsCurrentVersionRun`), Sair.
+- Menu do ícone: Pausar, Iniciar com o Windows (valor `snap-zones` em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), Sair.
 
 Janelas de programas rodando como administrador só encaixam se o snap-zones também rodar como administrador.
 
