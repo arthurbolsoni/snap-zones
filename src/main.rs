@@ -79,8 +79,56 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 struct Drag {
     hwnd: HWND,
     start: RECT,
+    start_frame: RECT,
     moved: bool,
     resizing: bool,
+    /// Ao redimensionar: janelas que dividiam a borda esquerda/direita e acompanham a mudança.
+    left_neighbors: Vec<(HWND, RECT)>,
+    right_neighbors: Vec<(HWND, RECT)>,
+    last_frame: RECT,
+}
+
+/// Janelas cuja borda direita (ou esquerda) encosta na borda esquerda (ou direita) de `frame`.
+fn neighbors(frame: &RECT, skip: [HWND; 3]) -> (Vec<(HWND, RECT)>, Vec<(HWND, RECT)>) {
+    const TOL: i32 = 10;
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for (hwnd, f) in visible_windows(skip) {
+        let overlap = f.bottom.min(frame.bottom) - f.top.max(frame.top);
+        if overlap < (frame.bottom - frame.top) / 2 {
+            continue; // precisa dividir boa parte da altura
+        }
+        if (f.right - frame.left).abs() <= TOL {
+            left.push((hwnd, f));
+        } else if (f.left - frame.right).abs() <= TOL {
+            right.push((hwnd, f));
+        }
+    }
+    (left, right)
+}
+
+/// Durante o redimensionamento, leva a borda das vizinhas junto com a da janela.
+fn follow_resize(drag: &mut Drag) {
+    let now = frame_rect(drag.hwnd);
+    if now == drag.last_frame {
+        return;
+    }
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    if now.left != drag.last_frame.left {
+        for (hwnd, f) in &drag.left_neighbors {
+            if now.left - f.left > 50 {
+                place_with(*hwnd, RECT { right: now.left, ..*f }, flags);
+            }
+        }
+    }
+    if now.right != drag.last_frame.right {
+        for (hwnd, f) in &drag.right_neighbors {
+            if f.right - now.right > 50 {
+                place_with(*hwnd, RECT { left: now.right, ..*f }, flags);
+            }
+        }
+    }
+    drag.last_frame = now;
 }
 
 #[derive(Default)]
@@ -173,7 +221,7 @@ fn frame_rect(hwnd: HWND) -> RECT {
 
 struct Scan {
     skip: [HWND; 3],
-    frames: Vec<RECT>,
+    frames: Vec<(HWND, RECT)>,
 }
 
 unsafe extern "system" fn collect_window(hwnd: HWND, lp: LPARAM) -> BOOL {
@@ -189,16 +237,22 @@ unsafe extern "system" fn collect_window(hwnd: HWND, lp: LPARAM) -> BOOL {
     let mut cloaked = 0u32;
     _ = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4);
     if cloaked == 0 {
-        scan.frames.push(frame_rect(hwnd));
+        scan.frames.push((hwnd, frame_rect(hwnd)));
     }
     TRUE
+}
+
+/// Janelas visíveis de nível superior na área de trabalho virtual atual, com o retângulo visível.
+fn visible_windows(skip: [HWND; 3]) -> Vec<(HWND, RECT)> {
+    let mut scan = Scan { skip, frames: Vec::new() };
+    unsafe { _ = EnumWindows(Some(collect_window), LPARAM(&mut scan as *mut _ as isize)) };
+    scan.frames
 }
 
 /// Quais zonas podem receber janela agora, conforme as que já estão ocupadas no monitor.
 /// Colunas sempre; zona de divisa só quando todas as colunas sob ela estão ocupadas.
 fn available(work: &RECT, skip: [HWND; 3], zones: &[Zone]) -> Vec<bool> {
-    let mut scan = Scan { skip, frames: Vec::new() };
-    unsafe { _ = EnumWindows(Some(collect_window), LPARAM(&mut scan as *mut _ as isize)) };
+    let scan = Scan { skip, frames: visible_windows(skip) };
 
     const TOL: i32 = 10;
     let close = |a: &RECT, b: &RECT| {
@@ -209,7 +263,7 @@ fn available(work: &RECT, skip: [HWND; 3], zones: &[Zone]) -> Vec<bool> {
     };
     let cols: Vec<usize> = (0..zones.len()).filter(|&i| zones[i].kind == Kind::Column).collect();
     let mut used = vec![false; zones.len()];
-    for f in &scan.frames {
+    for (_, f) in &scan.frames {
         for (i, z) in zones.iter().enumerate() {
             if close(f, &zone_rect(work, z.x0, z.x1)) {
                 used[i] = true;
@@ -255,6 +309,10 @@ fn monitor_work(pt: POINT) -> RECT {
 
 /// Move a janela para `target`, compensando a borda invisível que o Windows 10/11 põe em volta.
 fn place(hwnd: HWND, target: RECT) {
+    place_with(hwnd, target, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+fn place_with(hwnd: HWND, target: RECT, flags: SET_WINDOW_POS_FLAGS) {
     unsafe {
         if IsZoomed(hwnd).as_bool() {
             _ = ShowWindow(hwnd, SW_RESTORE);
@@ -282,7 +340,7 @@ fn place(hwnd: HWND, target: RECT) {
             target.top - t,
             target.right - target.left + l + r,
             target.bottom - target.top + t + b,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            flags,
         );
     }
 }
@@ -310,8 +368,10 @@ fn show_overlay(st: &State, show: bool) {
 /// Chamado a cada ~15 ms durante o arraste.
 fn tick() {
     STATE.with_borrow_mut(|st| {
+        let skip = [Default::default(), st.overlay, st.tray];
         let Some(drag) = st.drag.as_mut() else { return };
         if drag.resizing {
+            follow_resize(drag);
             return;
         }
         let now = window_rect(drag.hwnd);
@@ -321,7 +381,13 @@ fn tick() {
                 return; // só clicou na barra
             }
             if now.right - now.left != sw || now.bottom - now.top != sh {
-                drag.resizing = true; // redimensionando pela borda, não é arraste
+                // redimensionando pela borda, não é arraste: vizinhas acompanham
+                drag.resizing = true;
+                let (l, r) = neighbors(&drag.start_frame, [drag.hwnd, skip[1], skip[2]]);
+                drag.left_neighbors = l;
+                drag.right_neighbors = r;
+                drag.last_frame = drag.start_frame;
+                follow_resize(drag);
                 return;
             }
             drag.moved = true;
@@ -379,7 +445,12 @@ unsafe extern "system" fn win_event(
             if st.paused || !eligible(hwnd, st.overlay) {
                 return;
             }
-            st.drag = Some(Drag { hwnd, start: window_rect(hwnd), ..Default::default() });
+            st.drag = Some(Drag {
+                hwnd,
+                start: window_rect(hwnd),
+                start_frame: frame_rect(hwnd),
+                ..Default::default()
+            });
             st.picked.clear();
             st.full = false;
             st.alt = false;

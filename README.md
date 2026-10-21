@@ -15,6 +15,7 @@ Ao arrastar uma janela pela barra de título, as zonas aparecem sobre o monitor:
 - Zona ocupada = janela visível encaixada nela, no mesmo monitor e na área de trabalho virtual atual.
 - `Ctrl` ao soltar (com `Alt`): ocupa duas colunas vizinhas.
 - `Shift` durante o arraste: move sem encaixar.
+- Redimensionar uma janela pela borda lateral leva junto a vizinha que divide a mesma borda (50x50 → 25x75).
 - Menu do ícone: Pausar, Sair.
 
 Janelas de programas rodando como administrador só encaixam se o snap-zones também rodar como administrador.
