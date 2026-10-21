@@ -6,14 +6,14 @@ Ao arrastar uma janela pela barra de título, as zonas aparecem sobre o monitor:
 
 | Zona | Área | Quando aparece |
 | --- | --- | --- |
-| 1, 2, 3 | colunas de um terço da tela | sempre |
-| A | largura de uma coluna, centrada na divisa 1/2 | 1 e 2 ocupadas, ou B ocupada |
-| B | largura de uma coluna, centrada na divisa 2/3 | 2 e 3 ocupadas, ou A ocupada |
+| 1, 2 | metades da tela (padrão) | sempre |
+| A | metade da largura, centrada na divisa (25%–75%) | 1 e 2 ocupadas |
+| 1, 2, 3 | terços da tela | segurando `Alt` |
 | Tela cheia | notch no alto, ao centro | sempre; soltar maximiza |
 
 - Zonas sobrepostas: vence a de centro mais próximo do cursor.
 - Zona ocupada = janela visível encaixada nela, no mesmo monitor e na área de trabalho virtual atual.
-- `Ctrl` ao soltar: ocupa as duas colunas vizinhas.
+- `Ctrl` ao soltar (com `Alt`): ocupa duas colunas vizinhas.
 - `Shift` durante o arraste: move sem encaixar.
 - Menu do ícone: Pausar, Sair.
 
