@@ -14,11 +14,12 @@ Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do curs
 
 | Zona | Área | Quando aparece |
 | --- | --- | --- |
-| 1, 2, 3 (azul) | terços | sempre |
-| A (laranja) | metade da largura, centrada (25%–75%) | as duas metades ocupadas |
+| 1, 2, 3 | terços | sempre |
+| A | largura de um terço, centrada na divisa 1/2 (17%–50%) | 1 e 2 ocupados |
+| B | largura de um terço, centrada na divisa 2/3 (50%–83%) | 2 e 3 ocupados |
 | Tela cheia | notch no alto, ao centro | sempre |
 
-- Zonas sobrepostas: vence a de centro mais próximo do cursor; empate entre A e terço 2 fica com a A.
+- Zonas sobrepostas: vence a de centro mais próximo do cursor; A e B ficam por cima dos terços.
 - Zona ocupada = janela visível encaixada nela, no mesmo monitor e na área de trabalho virtual atual.
 - `Ctrl` ao soltar (com `Alt`): ocupa duas colunas vizinhas.
 - `Shift` durante o arraste: move sem encaixar.

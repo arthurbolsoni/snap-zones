@@ -59,7 +59,8 @@ const ZONES: &[Zone] = &[
     Zone { label: "3", kind: Kind::Third, x0: 2.0 * T, x1: 1.0 },
     Zone { label: "1", kind: Kind::Half, x0: 0.0, x1: 0.5 },
     Zone { label: "2", kind: Kind::Half, x0: 0.5, x1: 1.0 },
-    Zone { label: "A", kind: Kind::Bridge, x0: 0.25, x1: 0.75 },
+    Zone { label: "A", kind: Kind::Bridge, x0: T / 2.0, x1: T / 2.0 + T },
+    Zone { label: "B", kind: Kind::Bridge, x0: T + T / 2.0, x1: T + T / 2.0 + T },
 ];
 const HALF_LEFT: usize = 3;
 const HALF_RIGHT: usize = 4;
@@ -271,7 +272,8 @@ fn visible_windows(skip: [HWND; 3]) -> Vec<(HWND, RECT)> {
 }
 
 /// Quais zonas podem receber janela agora, conforme as que já estão ocupadas no monitor.
-/// No Alt: terços sempre; A só com as duas metades ocupadas. Metades ficam só nas bordas.
+/// No Alt: terços sempre; A e B (sobre as divisas) só com os dois terços de baixo ocupados.
+/// Metades ficam só nas bordas.
 fn available(work: &RECT, skip: [HWND; 3]) -> Vec<bool> {
     let zones = ZONES;
     let scan = Scan { skip, frames: visible_windows(skip) };
@@ -305,7 +307,11 @@ fn available(work: &RECT, skip: [HWND; 3]) -> Vec<bool> {
         .map(|z| match z.kind {
             Kind::Third => true,
             Kind::Half => false, // metades só pelas bordas, não aparecem no Alt
-            Kind::Bridge => used[HALF_LEFT] && used[HALF_RIGHT],
+            // A (divisa 1|2) com 1 e 2 ocupados; B (divisa 2|3) com 2 e 3 ocupados
+            Kind::Bridge => cols
+                .iter()
+                .filter(|&&c| zones[c].x0 < z.x1 && z.x0 < zones[c].x1)
+                .all(|&c| used[c]),
         })
         .collect()
 }
@@ -393,7 +399,7 @@ fn caption(kind: Kind) -> &'static str {
     match kind {
         Kind::Third => "33%",
         Kind::Half => "50%",
-        Kind::Bridge => "50% · centro",
+        Kind::Bridge => "33% · divisa",
     }
 }
 
@@ -825,11 +831,12 @@ fn main() -> windows::core::Result<()> {
 fn preview(dir: &str) -> windows::core::Result<()> {
     let mut gfx = render::Gfx::new()?;
     let work = RECT { left: 0, top: 0, right: 2560, bottom: 1038 };
-    let thirds_only = vec![true, true, true, false, false, false];
-    let with_a = vec![true, true, true, false, false, true];
-    let cases: [(&str, Mode, Vec<bool>, Vec<usize>, bool); 6] = [
+    let thirds_only = vec![true, true, true, false, false, false, false];
+    let with_a = vec![true, true, true, false, false, true, true];
+    let cases: [(&str, Mode, Vec<bool>, Vec<usize>, bool); 7] = [
         ("alt-terco", Mode::All, thirds_only.clone(), vec![1], false),
         ("alt-a", Mode::All, with_a.clone(), vec![5], false),
+        ("alt-b", Mode::All, with_a.clone(), vec![6], false),
         ("alt-ctrl", Mode::All, with_a, vec![0, 1], false),
         ("alt-notch", Mode::All, thirds_only, vec![], true),
         ("borda-esq", Mode::Edge, vec![], vec![HALF_LEFT], false),

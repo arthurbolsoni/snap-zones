@@ -347,9 +347,11 @@ impl Gfx {
             }
 
             if sc.detailed {
-                let cx_mid = (r.top + r.bottom) / 2.0;
-                // A tem o rótulo no alto, para não cair em cima do "2" do terço do meio
-                let mid = if z.style == Style::Overlay { r.top + 70.0 * s } else { cx_mid };
+                // A e B: rótulo no alto da zona; colunas: na faixa de baixo, livre de A e B
+                let mid = match z.style {
+                    Style::Overlay => r.top + 70.0 * s,
+                    Style::Column => r.bottom - h * 0.065,
+                };
                 let a = if z.active { 1.0 } else { 0.7 };
                 self.text(
                     z.label,
