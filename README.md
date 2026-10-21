@@ -15,7 +15,6 @@ Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do curs
 | Zona | Área | Quando aparece |
 | --- | --- | --- |
 | 1, 2, 3 (azul) | terços | sempre |
-| 1, 2 (roxo) | metades | sempre |
 | A (laranja) | metade da largura, centrada (25%–75%) | as duas metades ocupadas |
 | Tela cheia | notch no alto, ao centro | sempre |
 
@@ -23,7 +22,7 @@ Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do curs
 - Zona ocupada = janela visível encaixada nela, no mesmo monitor e na área de trabalho virtual atual.
 - `Ctrl` ao soltar (com `Alt`): ocupa duas colunas vizinhas.
 - `Shift` durante o arraste: move sem encaixar.
-- Janela encaixada puxada para fora das zonas volta ao tamanho de antes do encaixe.
+- Janela encaixada (inclusive em tela cheia) volta ao tamanho de antes do encaixe assim que começa a ser puxada; o arraste continua com ela já no tamanho original.
 - Redimensionar uma janela pela borda lateral leva junto a vizinha que divide a mesma borda (50x50 → 25x75).
 - Menu do ícone: Pausar, Sair.
 

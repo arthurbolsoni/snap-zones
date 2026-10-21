@@ -28,7 +28,10 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS, VK_CONTROL, VK_MENU, VK_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -156,6 +159,8 @@ struct State {
     full: bool, // soltar ocupa a área toda (borda de cima, ou notch no modo Alt)
     /// Tamanho (largura, altura) de cada janela antes de ser encaixada, para restaurar ao puxar.
     originals: HashMap<isize, (i32, i32)>,
+    /// Janela cujo arraste foi encerrado para voltar ao tamanho original e recomeçar.
+    restart: Option<(HWND, (i32, i32))>,
 }
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -269,7 +274,7 @@ fn visible_windows(skip: [HWND; 3]) -> Vec<(HWND, RECT)> {
 }
 
 /// Quais zonas podem receber janela agora, conforme as que já estão ocupadas no monitor.
-/// Terços e metades sempre; A só com as duas metades ocupadas.
+/// No Alt: terços sempre; A só com as duas metades ocupadas. Metades ficam só nas bordas.
 fn available(work: &RECT, skip: [HWND; 3]) -> Vec<bool> {
     let zones = ZONES;
     let scan = Scan { skip, frames: visible_windows(skip) };
@@ -300,7 +305,11 @@ fn available(work: &RECT, skip: [HWND; 3]) -> Vec<bool> {
     }
     zones
         .iter()
-        .map(|z| z.kind != Kind::Bridge || (used[HALF_LEFT] && used[HALF_RIGHT]))
+        .map(|z| match z.kind {
+            Kind::Third => true,
+            Kind::Half => false, // metades só pelas bordas, não aparecem no Alt
+            Kind::Bridge => used[HALF_LEFT] && used[HALF_RIGHT],
+        })
         .collect()
 }
 
@@ -402,18 +411,18 @@ fn restored_rect(hwnd: HWND, (w, h): (i32, i32), work: &RECT) -> RECT {
 
 /// Chamado a cada ~15 ms durante o arraste.
 fn tick() {
-    STATE.with_borrow_mut(|st| {
+    let release = STATE.with_borrow_mut(|st| {
         let skip = [Default::default(), st.overlay, st.tray];
-        let Some(drag) = st.drag.as_mut() else { return };
+        let Some(drag) = st.drag.as_mut() else { return false };
         if drag.resizing {
             follow_resize(drag);
-            return;
+            return false;
         }
         let now = window_rect(drag.hwnd);
         let (sw, sh) = (drag.start.right - drag.start.left, drag.start.bottom - drag.start.top);
         if !drag.moved {
             if now == drag.start {
-                return; // só clicou na barra
+                return false; // só clicou na barra
             }
             if now.right - now.left != sw || now.bottom - now.top != sh {
                 // redimensionando pela borda, não é arraste: vizinhas acompanham
@@ -423,14 +432,21 @@ fn tick() {
                 drag.right_neighbors = r;
                 drag.last_frame = drag.start_frame;
                 follow_resize(drag);
-                return;
+                return false;
             }
             drag.moved = true;
-            // janela encaixada sendo puxada: já volta ao tamanho original sob o cursor
+            // Janela encaixada sendo puxada: precisa voltar ao tamanho original já, mas o
+            // arraste do Windows mantém o tamanho do início. Solta o botão (encerra esse
+            // arraste), redimensiona no fim do arraste e aperta de novo (recomeça).
             if let Some(&size) = st.originals.get(&(drag.hwnd.0 as isize)) {
-                let work = monitor_work(drag_cursor());
-                let r = restored_rect(drag.hwnd, size, &work);
-                place_with(drag.hwnd, r, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                let f = drag.start_frame;
+                let differs = ((f.right - f.left) - size.0).abs() > 10 || ((f.bottom - f.top) - size.1).abs() > 10;
+                if differs {
+                    st.restart = Some((drag.hwnd, size));
+                    st.drag = None;
+                    unsafe { _ = KillTimer(Some(st.overlay), TIMER_ID) };
+                    return true;
+                }
             }
         }
 
@@ -469,7 +485,19 @@ fn tick() {
         if changed {
             show_overlay(st, mode != Mode::Hidden);
         }
+        false
     });
+    if release {
+        mouse(MOUSEEVENTF_LEFTUP);
+    }
+}
+
+fn mouse(flags: MOUSE_EVENT_FLAGS) {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: flags, ..Default::default() } },
+    };
+    unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
 }
 
 unsafe extern "system" fn win_event(
@@ -502,6 +530,19 @@ unsafe extern "system" fn win_event(
             unsafe { SetTimer(Some(st.overlay), TIMER_ID, 15, None) };
         }),
         EVENT_SYSTEM_MOVESIZEEND => {
+            // fim do arraste que o próprio app encerrou: tamanho original sob o cursor e recomeça
+            let restart = STATE.with_borrow_mut(|st| match st.restart {
+                Some((h, size)) if h == hwnd => {
+                    st.restart = None;
+                    Some(restored_rect(hwnd, size, &monitor_work(drag_cursor())))
+                }
+                _ => None,
+            });
+            if let Some(r) = restart {
+                place(hwnd, r);
+                mouse(MOUSEEVENTF_LEFTDOWN);
+                return;
+            }
             let target = STATE.with_borrow_mut(|st| {
                 let drag = st.drag.take()?;
                 unsafe { _ = KillTimer(Some(st.overlay), TIMER_ID) };
