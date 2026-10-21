@@ -22,6 +22,10 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -83,6 +87,9 @@ const TIMER_ID: usize = 1;
 const WM_TRAY: u32 = WM_APP + 1;
 const MENU_PAUSE: usize = 1;
 const MENU_QUIT: usize = 2;
+const MENU_STARTUP: usize = 3;
+const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+const RUN_VALUE: PCWSTR = w!("snap-zones");
 #[derive(Default)]
 struct Drag {
     hwnd: HWND,
@@ -226,7 +233,47 @@ fn eligible(hwnd: HWND, overlay: HWND) -> bool {
             return false;
         }
         let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-        style & WS_THICKFRAME.0 != 0
+        style & WS_THICKFRAME.0 != 0 && !fullscreen(hwnd)
+    }
+}
+
+/// Janela em tela cheia (jogo, vídeo, F11): cobre o monitor inteiro sem estar maximizada.
+/// O app só mexe em janela em modo janela.
+fn fullscreen(hwnd: HWND) -> bool {
+    unsafe {
+        if IsZoomed(hwnd).as_bool() {
+            return false;
+        }
+        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        _ = GetMonitorInfoW(mon, &mut mi);
+        let (r, m) = (window_rect(hwnd), mi.rcMonitor);
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+/// Liga ou desliga o início junto com o Windows (valor em HKCU\...\Run).
+fn startup_enabled() -> bool {
+    unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, None, None).is_ok()
+    }
+}
+
+fn set_startup(on: bool) {
+    unsafe {
+        let mut key = HKEY::default();
+        if RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None).is_err() {
+            return;
+        }
+        if on {
+            let Ok(exe) = std::env::current_exe() else { return };
+            let cmd: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain([0]).collect();
+            let bytes = std::slice::from_raw_parts(cmd.as_ptr() as *const u8, cmd.len() * 2);
+            _ = RegSetValueExW(key, RUN_VALUE, None, REG_SZ, Some(bytes));
+        } else {
+            _ = RegDeleteValueW(key, RUN_VALUE);
+        }
+        _ = RegCloseKey(key);
     }
 }
 
@@ -255,6 +302,7 @@ unsafe extern "system" fn collect_window(hwnd: HWND, lp: LPARAM) -> BOOL {
         || !IsWindowVisible(hwnd).as_bool()
         || IsIconic(hwnd).as_bool()
         || GetAncestor(hwnd, GA_ROOT) != hwnd
+        || fullscreen(hwnd)
     {
         return TRUE;
     }
@@ -872,6 +920,8 @@ fn tray_menu(hwnd: HWND) {
         let Ok(menu) = CreatePopupMenu() else { return };
         let pause_flags = if paused { MF_STRING | MF_CHECKED } else { MF_STRING };
         _ = AppendMenuW(menu, pause_flags, MENU_PAUSE, w!("Pausar"));
+        let startup_flags = if startup_enabled() { MF_STRING | MF_CHECKED } else { MF_STRING };
+        _ = AppendMenuW(menu, startup_flags, MENU_STARTUP, w!("Iniciar com o Windows"));
         _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair"));
         let mut pt = POINT::default();
@@ -896,6 +946,7 @@ fn tray_menu(hwnd: HWND) {
             PAUSED.store(st.paused, Ordering::Relaxed);
             unsafe { _ = Shell_NotifyIconW(NIM_MODIFY, &tray_data(st)) };
         }),
+        MENU_STARTUP => set_startup(!startup_enabled()),
         MENU_QUIT => STATE.with_borrow(|st| unsafe {
             _ = Shell_NotifyIconW(NIM_DELETE, &tray_data(st));
             PostQuitMessage(0);
