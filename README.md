@@ -9,12 +9,13 @@ Ao arrastar uma janela pela barra de título, as zonas aparecem sobre o monitor:
 | 1, 2 | metades da tela (padrão) | sempre |
 | A | metade da largura, centrada na divisa (25%–75%) | 1 e 2 ocupadas |
 | 1, 2, 3 | terços da tela | segurando `Alt` |
-| Tela cheia | notch no alto, ao centro | sempre; soltar maximiza |
+| Tela cheia | notch no alto, ao centro | sempre; soltar ocupa a área toda (sem maximizar, continua arrastável) |
 
 - Zonas sobrepostas: vence a de centro mais próximo do cursor.
 - Zona ocupada = janela visível encaixada nela, no mesmo monitor e na área de trabalho virtual atual.
 - `Ctrl` ao soltar (com `Alt`): ocupa duas colunas vizinhas.
 - `Shift` durante o arraste: move sem encaixar.
+- Janela encaixada puxada para fora das zonas volta ao tamanho de antes do encaixe.
 - Redimensionar uma janela pela borda lateral leva junto a vizinha que divide a mesma borda (50x50 → 25x75).
 - Menu do ícone: Pausar, Sair.
 

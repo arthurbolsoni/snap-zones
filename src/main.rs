@@ -9,6 +9,7 @@
 #![windows_subsystem = "windows"]
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows::core::{w, BOOL, PCWSTR};
@@ -143,6 +144,8 @@ struct State {
     alt: bool, // layout de terços
     avail: Vec<bool>,
     full: bool, // cursor no notch do topo: soltar maximiza
+    /// Tamanho (largura, altura) de cada janela antes de ser encaixada, para restaurar ao puxar.
+    originals: HashMap<isize, (i32, i32)>,
 }
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -365,6 +368,22 @@ fn show_overlay(st: &State, show: bool) {
     }
 }
 
+fn drag_cursor() -> POINT {
+    let mut pt = POINT::default();
+    unsafe { _ = GetCursorPos(&mut pt) };
+    pt
+}
+
+/// Retângulo com o tamanho `size`, mantendo o cursor na mesma proporção horizontal da barra.
+fn restored_rect(hwnd: HWND, (w, h): (i32, i32), work: &RECT) -> RECT {
+    let f = frame_rect(hwnd);
+    let pt = drag_cursor();
+    let rel = ((pt.x - f.left) as f64 / (f.right - f.left).max(1) as f64).clamp(0.0, 1.0);
+    let left = pt.x - (rel * w as f64).round() as i32;
+    let top = f.top.max(work.top);
+    RECT { left, top, right: left + w, bottom: top + h }
+}
+
 /// Chamado a cada ~15 ms durante o arraste.
 fn tick() {
     STATE.with_borrow_mut(|st| {
@@ -391,6 +410,12 @@ fn tick() {
                 return;
             }
             drag.moved = true;
+            // janela encaixada sendo puxada: já volta ao tamanho original sob o cursor
+            if let Some(&size) = st.originals.get(&(drag.hwnd.0 as isize)) {
+                let work = monitor_work(drag_cursor());
+                let r = restored_rect(drag.hwnd, size, &work);
+                place_with(drag.hwnd, r, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+            }
         }
 
         let mut pt = POINT::default();
@@ -458,7 +483,7 @@ unsafe extern "system" fn win_event(
             unsafe { SetTimer(Some(st.overlay), TIMER_ID, 15, None) };
         }),
         EVENT_SYSTEM_MOVESIZEEND => {
-            let snap = STATE.with_borrow_mut(|st| {
+            let target = STATE.with_borrow_mut(|st| {
                 let drag = st.drag.take()?;
                 unsafe { _ = KillTimer(Some(st.overlay), TIMER_ID) };
                 show_overlay(st, false);
@@ -467,21 +492,30 @@ unsafe extern "system" fn win_event(
                 if drag.hwnd != hwnd || !drag.moved || drag.resizing {
                     return None;
                 }
-                if full {
-                    return Some(None);
+                let key = hwnd.0 as isize;
+                let snap = if full {
+                    // ocupa a área toda sem o estado "maximizado", para continuar arrastável
+                    Some(st.work)
+                } else if !picked.is_empty() {
+                    let zones = layout(st.alt);
+                    let x0 = picked.iter().map(|&i| zones[i].x0).fold(f64::MAX, f64::min);
+                    let x1 = picked.iter().map(|&i| zones[i].x1).fold(f64::MIN, f64::max);
+                    Some(zone_rect(&st.work, x0, x1))
+                } else {
+                    None
+                };
+                match snap {
+                    Some(t) => {
+                        let f = drag.start_frame;
+                        st.originals.entry(key).or_insert((f.right - f.left, f.bottom - f.top));
+                        Some(t)
+                    }
+                    // solta fora das zonas: volta ao tamanho de antes do encaixe
+                    None => st.originals.remove(&key).map(|size| restored_rect(hwnd, size, &st.work)),
                 }
-                if picked.is_empty() {
-                    return None;
-                }
-                let zones = layout(st.alt);
-                let x0 = picked.iter().map(|&i| zones[i].x0).fold(f64::MAX, f64::min);
-                let x1 = picked.iter().map(|&i| zones[i].x1).fold(f64::MIN, f64::max);
-                Some(Some(zone_rect(&st.work, x0, x1)))
             });
-            match snap {
-                Some(Some(target)) => place(hwnd, target),
-                Some(None) => unsafe { _ = ShowWindow(hwnd, SW_MAXIMIZE) },
-                None => {}
+            if let Some(t) = target {
+                place(hwnd, t);
             }
         }
         _ => {}
