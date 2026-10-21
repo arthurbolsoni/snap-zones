@@ -35,3 +35,5 @@ cargo build --release
 ```
 
 Executável em `target/release/snap-zones.exe`.
+
+`snap-zones --preview <pasta>` desenha os estados do overlay e o ícone em BMP, sem abrir nada na tela.
