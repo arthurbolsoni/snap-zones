@@ -33,8 +33,7 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEINPUT, MOUSE_EVENT_FLAGS, VK_CONTROL, VK_LBUTTON, VK_MENU, VK_SHIFT,
+    GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -579,17 +578,17 @@ fn resize_vmax(st: &mut State) {
 fn tick() {
     let release = STATE.with_borrow_mut(|st| {
         let skip = [Default::default(), st.overlay, st.tray];
-        let Some(drag) = st.drag.as_mut() else { return false };
+        let Some(drag) = st.drag.as_mut() else { return None };
         if drag.resizing {
             follow_resize(drag);
             resize_vmax(st);
-            return false;
+            return None;
         }
         let now = window_rect(drag.hwnd);
         let (sw, sh) = (drag.start.right - drag.start.left, drag.start.bottom - drag.start.top);
         if !drag.moved {
             if now == drag.start {
-                return false; // só clicou na barra
+                return None; // só clicou na barra
             }
             if now.right - now.left != sw || now.bottom - now.top != sh {
                 // redimensionando pela borda, não é arraste: vizinhas acompanham
@@ -599,7 +598,7 @@ fn tick() {
                 drag.right_neighbors = r;
                 drag.last_frame = drag.start_frame;
                 follow_resize(drag);
-                return false;
+                return None;
             }
             drag.moved = true;
             // Janela encaixada sendo puxada: precisa voltar ao tamanho original já, mas o
@@ -609,10 +608,11 @@ fn tick() {
                 let f = drag.start_frame;
                 let differs = ((f.right - f.left) - size.0).abs() > 10 || ((f.bottom - f.top) - size.1).abs() > 10;
                 if differs {
+                    let hwnd_restart = drag.hwnd;
                     st.restart = Some((drag.hwnd, size));
                     st.drag = None;
                     unsafe { _ = KillTimer(Some(st.overlay), TIMER_ID) };
-                    return true;
+                    return Some(hwnd_restart);
                 }
             }
         }
@@ -661,20 +661,15 @@ fn tick() {
         if changed || (animating && mode != Mode::Hidden) {
             show_overlay(st, mode != Mode::Hidden);
         }
-        false
+        None
     });
-    if release {
-        mouse(MOUSEEVENTF_LEFTUP);
+    // encerra o arraste do Windows liberando a captura (o botão continua apertado de verdade,
+    // e o arraste recomeça no fim dele, já no tamanho original)
+    if let Some(h) = release {
+        unsafe { _ = PostMessageW(Some(h), WM_CANCELMODE, WPARAM(0), LPARAM(0)) };
     }
 }
 
-fn mouse(flags: MOUSE_EVENT_FLAGS) {
-    let input = INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: flags, ..Default::default() } },
-    };
-    unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
-}
 
 /// Janela de bandeja (recebe WM_UNMAXIMIZE) e pausa, lidos pelo gancho de mouse sem tocar no STATE.
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -705,22 +700,25 @@ fn maximized_caption(pt: POINT) -> Option<HWND> {
 unsafe extern "system" fn mouse_ll(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 && !PAUSED.load(Ordering::Relaxed) {
         let info = &*(lp.0 as *const MSLLHOOKSTRUCT);
-        if info.flags & LLMHF_INJECTED == 0 {
-            match wp.0 as u32 {
-                WM_LBUTTONDOWN => PRESS.set(maximized_caption(info.pt).map(|h| (h, info.pt))),
-                WM_LBUTTONUP => PRESS.set(None),
-                WM_MOUSEMOVE => {
-                    if let Some((h, p)) = PRESS.get() {
-                        let (dx, dy) = (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG));
-                        if (info.pt.x - p.x).abs() > dx || (info.pt.y - p.y).abs() > dy {
-                            PRESS.set(None);
-                            let tray = HWND(TRAY_HWND.load(Ordering::Relaxed) as *mut _);
-                            _ = PostMessageW(Some(tray), WM_UNMAXIMIZE, WPARAM(h.0 as usize), LPARAM(0));
-                        }
+        match wp.0 as u32 {
+            WM_LBUTTONDOWN => {
+                let found = maximized_caption(info.pt);
+                log(&format!("down {:?} maximizada={:?}", (info.pt.x, info.pt.y), found));
+                PRESS.set(found.map(|h| (h, info.pt)));
+            }
+            WM_LBUTTONUP => PRESS.set(None),
+            WM_MOUSEMOVE => {
+                if let Some((h, p)) = PRESS.get() {
+                    let (dx, dy) = (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG));
+                    if (info.pt.x - p.x).abs() > dx || (info.pt.y - p.y).abs() > dy {
+                        log("arraste detectado, pedindo restauração");
+                        PRESS.set(None);
+                        let tray = HWND(TRAY_HWND.load(Ordering::Relaxed) as *mut _);
+                        _ = PostMessageW(Some(tray), WM_UNMAXIMIZE, WPARAM(h.0 as usize), LPARAM(0));
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
     CallNextHookEx(None, code, wp, lp)
@@ -729,6 +727,7 @@ unsafe extern "system" fn mouse_ll(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
 /// Restaura a janela maximizada sob o cursor, mantendo o ponto da barra, e recomeça o arraste.
 fn unmaximize_drag(hwnd: HWND) {
     unsafe {
+        log(&format!("unmaximize zoomed={} botao={}", IsZoomed(hwnd).as_bool(), key_down(VK_LBUTTON.0 as i32)));
         if !IsZoomed(hwnd).as_bool() || !key_down(VK_LBUTTON.0 as i32) {
             return;
         }
@@ -736,14 +735,16 @@ fn unmaximize_drag(hwnd: HWND) {
         let pt = drag_cursor();
         let rel = ((pt.x - max.left) as f64 / (max.right - max.left).max(1) as f64).clamp(0.0, 1.0);
         let dy = pt.y - max.top;
-        mouse(MOUSEEVENTF_LEFTUP);
         _ = ShowWindow(hwnd, SW_RESTORE);
         let f = frame_rect(hwnd);
         let (w, h) = (f.right - f.left, f.bottom - f.top);
         let left = pt.x - (rel * w as f64).round() as i32;
         let top = pt.y - dy;
         place(hwnd, RECT { left, top, right: left + w, bottom: top + h });
-        mouse(MOUSEEVENTF_LEFTDOWN);
+        // arraste a partir da barra de título, seguindo o cursor onde ele estiver agora
+        // (o botão continua apertado de verdade, então o arraste termina ao soltar)
+        _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(SC_MOVE as usize | HTCAPTION as usize), LPARAM(0));
+        log("restaurada, arraste pedido");
     }
 }
 
@@ -788,7 +789,9 @@ unsafe extern "system" fn win_event(
             });
             if let Some(r) = restart {
                 place(hwnd, r);
-                mouse(MOUSEEVENTF_LEFTDOWN);
+                // recomeça o arraste pela barra de título a partir de onde o cursor está agora
+                unsafe { _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(SC_MOVE as usize | HTCAPTION as usize), LPARAM(0)) };
+                log("encaixada restaurada, arraste pedido");
                 return;
             }
             let target = STATE.with_borrow_mut(|st| {
@@ -1087,4 +1090,16 @@ fn write_bmp(path: &str, w: i32, h: i32, px: &[u32], dark_bg: bool) {
     f.extend_from_slice(&[0u8; 24]);
     f.extend_from_slice(&data);
     _ = std::fs::write(path, f);
+}
+
+/// Log de diagnóstico em %TEMP%\snap-zones.log, só com a variável SNAPZONES_LOG definida.
+fn log(msg: &str) {
+    use std::io::Write;
+    if std::env::var_os("SNAPZONES_LOG").is_none() {
+        return;
+    }
+    let path = std::env::temp_dir().join("snap-zones.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        _ = writeln!(f, "{:?} {msg}", std::time::SystemTime::now());
+    }
 }
