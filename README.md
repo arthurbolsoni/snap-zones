@@ -2,16 +2,24 @@
 
 Encaixe de janelas para monitor ultrawide no Windows. Fica na bandeja do sistema.
 
-Ao arrastar uma janela pela barra de título, as zonas aparecem sobre o monitor:
+Arrastando uma janela pela barra de título, nada aparece no meio da tela. Encostando o cursor numa borda do monitor aparece só a zona daquela borda:
+
+| Borda | Zona |
+| --- | --- |
+| esquerda | metade esquerda |
+| direita | metade direita |
+| cima | tela cheia (ocupa a área toda sem maximizar, continua arrastável) |
+
+Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do cursor escolhe:
 
 | Zona | Área | Quando aparece |
 | --- | --- | --- |
-| 1, 2 | metades da tela (padrão) | sempre |
-| A | metade da largura, centrada na divisa (25%–75%) | 1 e 2 ocupadas |
-| 1, 2, 3 | terços da tela | segurando `Alt` |
-| Tela cheia | notch no alto, ao centro | sempre; soltar ocupa a área toda (sem maximizar, continua arrastável) |
+| 1, 2, 3 (azul) | terços | sempre |
+| 1, 2 (roxo) | metades | sempre |
+| A (laranja) | metade da largura, centrada (25%–75%) | as duas metades ocupadas |
+| Tela cheia | notch no alto, ao centro | sempre |
 
-- Zonas sobrepostas: vence a de centro mais próximo do cursor.
+- Zonas sobrepostas: vence a de centro mais próximo do cursor; empate entre A e terço 2 fica com a A.
 - Zona ocupada = janela visível encaixada nela, no mesmo monitor e na área de trabalho virtual atual.
 - `Ctrl` ao soltar (com `Alt`): ocupa duas colunas vizinhas.
 - `Shift` durante o arraste: move sem encaixar.

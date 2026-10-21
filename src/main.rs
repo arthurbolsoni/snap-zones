@@ -1,9 +1,9 @@
-//! Encaixe de janelas para monitor ultrawide: metades (com A centrada na divisa) ou, com Alt, terços.
+//! Encaixe de janelas para monitor ultrawide.
 //!
-//! Ao arrastar qualquer janela pela barra de título, as zonas aparecem por cima da tela.
-//! Entre zonas sobrepostas vence a de centro mais próximo do cursor.
-//! Ctrl ao soltar (terços): ocupa as duas colunas vizinhas. Shift: arrasta sem encaixar.
-//! Notch no topo: tela cheia.
+//! Arrastando uma janela: borda esquerda = metade esquerda, borda direita = metade direita,
+//! borda de cima = tela cheia. Com Alt aparecem todas as zonas (terços, metades, A centrada
+//! quando as duas metades estão ocupadas, notch de tela cheia); vence a de centro mais próximo.
+//! Ctrl (com Alt): dois terços. Shift: arrasta sem encaixar.
 //! Fica na bandeja do sistema; o menu do ícone pausa ou fecha.
 
 #![windows_subsystem = "windows"]
@@ -33,7 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
-    Column,
+    Third,
+    Half,
     Bridge,
 }
 
@@ -44,24 +45,32 @@ struct Zone {
     x1: f64,
 }
 
-/// Padrão: metades, como o Windows; A (centrada na divisa) só com 1 e 2 ocupadas.
-const HALVES: &[Zone] = &[
-    Zone { label: "1", kind: Kind::Column, x0: 0.0, x1: 0.5 },
-    Zone { label: "2", kind: Kind::Column, x0: 0.5, x1: 1.0 },
+const T: f64 = 1.0 / 3.0;
+const ZONES: &[Zone] = &[
+    Zone { label: "1", kind: Kind::Third, x0: 0.0, x1: T },
+    Zone { label: "2", kind: Kind::Third, x0: T, x1: 2.0 * T },
+    Zone { label: "3", kind: Kind::Third, x0: 2.0 * T, x1: 1.0 },
+    Zone { label: "1", kind: Kind::Half, x0: 0.0, x1: 0.5 },
+    Zone { label: "2", kind: Kind::Half, x0: 0.5, x1: 1.0 },
     Zone { label: "A", kind: Kind::Bridge, x0: 0.25, x1: 0.75 },
 ];
+const HALF_LEFT: usize = 3;
+const HALF_RIGHT: usize = 4;
 
-/// Com Alt: terços.
-const T: f64 = 1.0 / 3.0;
-const THIRDS: &[Zone] = &[
-    Zone { label: "1", kind: Kind::Column, x0: 0.0, x1: T },
-    Zone { label: "2", kind: Kind::Column, x0: T, x1: 2.0 * T },
-    Zone { label: "3", kind: Kind::Column, x0: 2.0 * T, x1: 1.0 },
-];
-
-fn layout(alt: bool) -> &'static [Zone] {
-    if alt { THIRDS } else { HALVES }
+/// Como as zonas aparecem durante o arraste.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Mode {
+    /// nada na tela
+    #[default]
+    Hidden,
+    /// cursor encostado numa borda: só a zona daquela borda
+    Edge,
+    /// Alt: todas as zonas
+    All,
 }
+
+/// Distância do cursor até a borda do monitor para valer como "encostado".
+const EDGE: i32 = 2;
 
 const TIMER_ID: usize = 1;
 const WM_TRAY: u32 = WM_APP + 1;
@@ -71,6 +80,7 @@ const KEY: COLORREF = COLORREF(0x00FF00FF); // magenta = transparente
 const BLUE: COLORREF = rgb(110, 165, 255);
 const ORANGE: COLORREF = rgb(255, 175, 70);
 const GREEN: COLORREF = rgb(90, 215, 140);
+const PURPLE: COLORREF = rgb(190, 135, 255);
 
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
@@ -141,9 +151,9 @@ struct State {
     drag: Option<Drag>,
     work: RECT,
     picked: Vec<usize>,
-    alt: bool, // layout de terços
+    mode: Mode,
     avail: Vec<bool>,
-    full: bool, // cursor no notch do topo: soltar maximiza
+    full: bool, // soltar ocupa a área toda (borda de cima, ou notch no modo Alt)
     /// Tamanho (largura, altura) de cada janela antes de ser encaixada, para restaurar ao puxar.
     originals: HashMap<isize, (i32, i32)>,
 }
@@ -162,19 +172,25 @@ fn center(z: &Zone) -> f64 {
     (z.x0 + z.x1) / 2.0
 }
 
-/// Zonas escolhidas para a posição horizontal `fx` (0..1 da área de trabalho).
-fn pick(fx: f64, ctrl: bool, zones: &[Zone], avail: &[bool]) -> Vec<usize> {
-    let dist = |i: &usize| (center(&zones[*i]) - fx).abs();
-    let mut cols: Vec<usize> = (0..zones.len()).filter(|&i| zones[i].kind == Kind::Column).collect();
-    if ctrl && cols.len() > 2 {
+/// Modo Alt: zona escolhida para a posição horizontal `fx` (0..1 da área de trabalho).
+/// Vence a de centro mais próximo; empate (A e terço 2) fica com a A.
+fn pick(fx: f64, ctrl: bool, avail: &[bool]) -> Vec<usize> {
+    let dist = |i: &usize| (center(&ZONES[*i]) - fx).abs();
+    if ctrl {
+        let mut cols: Vec<usize> = (0..ZONES.len()).filter(|&i| ZONES[i].kind == Kind::Third).collect();
         cols.sort_by(|a, b| dist(a).total_cmp(&dist(b)));
         cols.truncate(2);
         cols.sort();
         return cols;
     }
-    (0..zones.len())
-        .filter(|&i| avail[i] && fx >= zones[i].x0 && fx <= zones[i].x1)
-        .min_by(|a, b| dist(a).total_cmp(&dist(b)))
+    let key = |i: &usize| (dist(i), ZONES[*i].kind != Kind::Bridge);
+    (0..ZONES.len())
+        .filter(|&i| avail[i] && fx >= ZONES[i].x0 && fx <= ZONES[i].x1)
+        .min_by(|a, b| {
+            let (da, ba) = key(a);
+            let (db, bb) = key(b);
+            if (da - db).abs() < 1e-9 { ba.cmp(&bb) } else { da.total_cmp(&db) }
+        })
         .into_iter()
         .collect()
 }
@@ -253,8 +269,9 @@ fn visible_windows(skip: [HWND; 3]) -> Vec<(HWND, RECT)> {
 }
 
 /// Quais zonas podem receber janela agora, conforme as que já estão ocupadas no monitor.
-/// Colunas sempre; zona de divisa só quando todas as colunas sob ela estão ocupadas.
-fn available(work: &RECT, skip: [HWND; 3], zones: &[Zone]) -> Vec<bool> {
+/// Terços e metades sempre; A só com as duas metades ocupadas.
+fn available(work: &RECT, skip: [HWND; 3]) -> Vec<bool> {
+    let zones = ZONES;
     let scan = Scan { skip, frames: visible_windows(skip) };
 
     const TOL: i32 = 10;
@@ -264,7 +281,7 @@ fn available(work: &RECT, skip: [HWND; 3], zones: &[Zone]) -> Vec<bool> {
             && (a.top - b.top).abs() <= TOL
             && (a.bottom - b.bottom).abs() <= TOL
     };
-    let cols: Vec<usize> = (0..zones.len()).filter(|&i| zones[i].kind == Kind::Column).collect();
+    let cols: Vec<usize> = (0..zones.len()).filter(|&i| zones[i].kind == Kind::Third).collect();
     let mut used = vec![false; zones.len()];
     for (_, f) in &scan.frames {
         for (i, z) in zones.iter().enumerate() {
@@ -272,7 +289,7 @@ fn available(work: &RECT, skip: [HWND; 3], zones: &[Zone]) -> Vec<bool> {
                 used[i] = true;
             }
         }
-        // janela ocupando duas colunas vizinhas (Ctrl) preenche as duas
+        // janela ocupando dois terços vizinhos (Ctrl) preenche os dois
         for pair in cols.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             if close(f, &zone_rect(work, zones[a].x0, zones[b].x1)) {
@@ -283,13 +300,7 @@ fn available(work: &RECT, skip: [HWND; 3], zones: &[Zone]) -> Vec<bool> {
     }
     zones
         .iter()
-        .map(|z| match z.kind {
-            Kind::Column => true,
-            Kind::Bridge => cols
-                .iter()
-                .filter(|&&c| zones[c].x0 < z.x1 && z.x0 < zones[c].x1)
-                .all(|&c| used[c]),
-        })
+        .map(|z| z.kind != Kind::Bridge || (used[HALF_LEFT] && used[HALF_RIGHT]))
         .collect()
 }
 
@@ -301,13 +312,18 @@ fn notch_rect(work: &RECT) -> RECT {
     RECT { left, top: work.top, right: left + nw, bottom: work.top + nh }
 }
 
-fn monitor_work(pt: POINT) -> RECT {
+/// (retângulo do monitor, área de trabalho sem a barra de tarefas) sob o ponto.
+fn monitor_rects(pt: POINT) -> (RECT, RECT) {
     unsafe {
         let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         _ = GetMonitorInfoW(mon, &mut mi);
-        mi.rcWork
+        (mi.rcMonitor, mi.rcWork)
     }
+}
+
+fn monitor_work(pt: POINT) -> RECT {
+    monitor_rects(pt).1
 }
 
 /// Move a janela para `target`, compensando a borda invisível que o Windows 10/11 põe em volta.
@@ -418,38 +434,41 @@ fn tick() {
             }
         }
 
-        let mut pt = POINT::default();
-        unsafe { _ = GetCursorPos(&mut pt) };
-        let work = monitor_work(pt);
-        let skip = key_down(VK_SHIFT.0 as i32);
-        let fx = ((pt.x - work.left) as f64 / (work.right - work.left) as f64).clamp(0.0, 1.0);
-        let alt = key_down(VK_MENU.0 as i32);
-        let relayout = work != st.work || alt != st.alt;
-        if relayout {
-            st.avail = available(&work, [drag.hwnd, st.overlay, st.tray], layout(alt));
+        let pt = drag_cursor();
+        let (mon, work) = monitor_rects(pt);
+        let new_monitor = work != st.work;
+        if new_monitor {
+            st.avail = available(&work, [drag.hwnd, st.overlay, st.tray]);
         }
-        let full = !skip && unsafe { PtInRect(&notch_rect(&work), pt).as_bool() };
-        let picked = if skip || full {
-            vec![]
+
+        let (mode, picked, full) = if key_down(VK_SHIFT.0 as i32) {
+            (Mode::Hidden, vec![], false)
+        } else if key_down(VK_MENU.0 as i32) {
+            // Alt: todas as zonas, escolhe pela posição
+            if unsafe { PtInRect(&notch_rect(&work), pt).as_bool() } {
+                (Mode::All, vec![], true)
+            } else {
+                let fx = ((pt.x - work.left) as f64 / (work.right - work.left) as f64).clamp(0.0, 1.0);
+                (Mode::All, pick(fx, key_down(VK_CONTROL.0 as i32), &st.avail), false)
+            }
+        } else if pt.x <= mon.left + EDGE {
+            (Mode::Edge, vec![HALF_LEFT], false)
+        } else if pt.x >= mon.right - 1 - EDGE {
+            (Mode::Edge, vec![HALF_RIGHT], false)
+        } else if pt.y <= mon.top + EDGE {
+            (Mode::Edge, vec![], true)
         } else {
-            pick(fx, key_down(VK_CONTROL.0 as i32), layout(alt), &st.avail)
+            (Mode::Hidden, vec![], false)
         };
+
+        let changed = new_monitor || mode != st.mode || picked != st.picked || full != st.full;
         st.work = work;
-        st.alt = alt;
-        if skip {
-            show_overlay(st, false);
-        } else if relayout
-            || picked != st.picked
-            || full != st.full
-            || unsafe { !IsWindowVisible(st.overlay).as_bool() }
-        {
-            st.picked = picked;
-            st.full = full;
-            show_overlay(st, true);
-            return;
-        }
+        st.mode = mode;
         st.picked = picked;
         st.full = full;
+        if changed {
+            show_overlay(st, mode != Mode::Hidden);
+        }
     });
 }
 
@@ -478,7 +497,7 @@ unsafe extern "system" fn win_event(
             });
             st.picked.clear();
             st.full = false;
-            st.alt = false;
+            st.mode = Mode::Hidden;
             st.work = RECT::default();
             unsafe { SetTimer(Some(st.overlay), TIMER_ID, 15, None) };
         }),
@@ -489,6 +508,7 @@ unsafe extern "system" fn win_event(
                 show_overlay(st, false);
                 let picked = std::mem::take(&mut st.picked);
                 let full = std::mem::take(&mut st.full);
+                st.mode = Mode::Hidden;
                 if drag.hwnd != hwnd || !drag.moved || drag.resizing {
                     return None;
                 }
@@ -497,9 +517,8 @@ unsafe extern "system" fn win_event(
                     // ocupa a área toda sem o estado "maximizado", para continuar arrastável
                     Some(st.work)
                 } else if !picked.is_empty() {
-                    let zones = layout(st.alt);
-                    let x0 = picked.iter().map(|&i| zones[i].x0).fold(f64::MAX, f64::min);
-                    let x1 = picked.iter().map(|&i| zones[i].x1).fold(f64::MIN, f64::max);
+                    let x0 = picked.iter().map(|&i| ZONES[i].x0).fold(f64::MAX, f64::min);
+                    let x1 = picked.iter().map(|&i| ZONES[i].x1).fold(f64::MIN, f64::max);
                     Some(zone_rect(&st.work, x0, x1))
                 } else {
                     None
@@ -543,19 +562,32 @@ fn paint(hwnd: HWND) {
         SetBkMode(hdc, TRANSPARENT);
         let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
 
-        // Colunas primeiro, zonas de borda por cima, a ativa por último.
-        let zones = layout(st.alt);
-        let mut order: Vec<usize> =
-            (0..zones.len()).filter(|&i| st.avail.get(i) == Some(&true) && !st.picked.contains(&i)).collect();
+        // Alt: todas as disponíveis (terços, metades, A), a ativa por último.
+        // Borda: só a zona escolhida.
+        let mut order: Vec<usize> = if st.mode == Mode::All {
+            (0..ZONES.len()).filter(|&i| st.avail.get(i) == Some(&true) && !st.picked.contains(&i)).collect()
+        } else {
+            vec![]
+        };
         order.extend(st.picked.iter().copied());
 
+        let h = client.bottom;
         for i in order {
-            let z = &zones[i];
+            let z = &ZONES[i];
             let active = st.picked.contains(&i);
-            let color = if z.kind == Kind::Column { BLUE } else { ORANGE };
+            let color = match z.kind {
+                Kind::Third => BLUE,
+                Kind::Half => PURPLE,
+                Kind::Bridge => ORANGE,
+            };
             let mut r = zone_rect(&origin, z.x0, z.x1);
-            // zonas de borda um pouco menores na vertical para se distinguirem das colunas
-            let inset = if z.kind == Kind::Bridge { client.bottom / 30 } else { 4 };
+            // alturas diferentes para dar para ver cada tipo por cima do outro
+            let inset = match z.kind {
+                _ if st.mode == Mode::Edge => 4,
+                Kind::Third => 4,
+                Kind::Half => h / 14,
+                Kind::Bridge => h / 7,
+            };
             r.left += 4;
             r.right -= 4;
             r.top += inset;
@@ -574,14 +606,41 @@ fn paint(hwnd: HWND) {
 
             SetTextColor(hdc, if active { rgb(255, 255, 255) } else { color });
             let mut text: Vec<u16> = z.label.encode_utf16().collect();
+            // rótulos em alturas diferentes: A em cima, terços no meio, metades embaixo
             let mut tr = r;
-            if z.kind == Kind::Bridge {
-                tr.bottom = r.top + client.bottom / 4; // rótulo da borda no alto, para não cobrir o da coluna
+            if st.mode == Mode::All {
+                match z.kind {
+                    Kind::Bridge => tr.bottom = r.top + h / 4,
+                    Kind::Half => tr.top = r.bottom - h / 4,
+                    Kind::Third => {}
+                }
             }
             DrawTextW(hdc, &mut text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
-        // notch do topo, por cima de tudo
+        // borda de cima: prévia da tela cheia
+        if st.mode == Mode::Edge && st.full {
+            let mut r = origin;
+            r.left += 4;
+            r.top += 4;
+            r.right -= 4;
+            r.bottom -= 4;
+            let fill = CreateSolidBrush(GREEN);
+            FillRect(hdc, &r, fill);
+            _ = DeleteObject(fill.into());
+            SetTextColor(hdc, rgb(20, 20, 20));
+            let mut text: Vec<u16> = "Tela cheia".encode_utf16().collect();
+            DrawTextW(hdc, &mut text, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        if st.mode != Mode::All {
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_font);
+            _ = DeleteObject(font.into());
+            _ = EndPaint(hwnd, &ps);
+            return;
+        }
+
+        // Alt: notch do topo, por cima de tudo
         let n = notch_rect(&origin);
         let radius = (n.bottom - n.top) / 2;
         let fill = CreateSolidBrush(if st.full { GREEN } else { rgb(28, 30, 36) });
