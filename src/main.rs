@@ -154,6 +154,8 @@ struct State {
     full: bool, // soltar ocupa a área toda (borda de cima, ou notch no modo Alt)
     /// encaixe pela borda: (x0, x1) em fração da área — metade ou o espaço que sobra
     span: Option<(f64, f64)>,
+    /// redimensionando até o topo/fim da tela: (x0, x1) da janela, que vai ficar com a altura toda
+    vmax: Option<(f64, f64)>,
     /// Tamanho (largura, altura) de cada janela antes de ser encaixada, para restaurar ao puxar.
     originals: HashMap<isize, (i32, i32)>,
     /// Janela cujo arraste foi encerrado para voltar ao tamanho original e recomeçar.
@@ -441,6 +443,25 @@ fn scene(st: &State) -> render::Scene {
     let scale = dpi_scale(&st.work);
     let t = st.anim_start.map_or(1.0, |s| s.elapsed().as_secs_f32() / ANIM.as_secs_f32());
     let detailed = st.mode == Mode::All;
+    if let Some((a, b)) = st.vmax {
+        return render::Scene {
+            w,
+            h,
+            scale,
+            detailed: false,
+            zones: vec![render::ZoneDraw {
+                x0: (a * w as f64).round() as f32,
+                x1: (b * w as f64).round() as f32,
+                label: "",
+                caption: "",
+                style: render::Style::Column,
+                active: true,
+            }],
+            notch: None,
+            full_preview: false,
+            t,
+        };
+    }
     let draw = |i: usize, active: bool| {
         let z = &ZONES[i];
         render::ZoneDraw {
@@ -524,6 +545,36 @@ fn restored_rect(hwnd: HWND, (w, h): (i32, i32), work: &RECT) -> RECT {
     RECT { left, top, right: left + w, bottom: top + h }
 }
 
+/// Redimensionando pela borda de cima (ou de baixo) com o cursor no topo (ou no fim) da tela:
+/// prévia de altura inteira, como o Windows. Devolve (x0, x1) da janela em fração da área.
+fn resize_vmax(st: &mut State) {
+    let Some(drag) = st.drag.as_ref() else { return };
+    let (hwnd, start) = (drag.hwnd, drag.start_frame);
+    let f = frame_rect(hwnd);
+    let pt = drag_cursor();
+    let (mon, work) = monitor_rects(pt);
+    let at_edge = if f.top != start.top {
+        pt.y <= mon.top + EDGE
+    } else if f.bottom != start.bottom {
+        pt.y >= mon.bottom - 1 - EDGE
+    } else {
+        false
+    };
+    let w = (work.right - work.left) as f64;
+    let vmax = at_edge.then(|| ((f.left - work.left) as f64 / w, (f.right - work.left) as f64 / w));
+    if vmax != st.vmax || work != st.work {
+        if vmax.is_some() {
+            st.anim_start = Some(Instant::now());
+        }
+        st.vmax = vmax;
+        st.work = work;
+        st.mode = if vmax.is_some() { Mode::Edge } else { Mode::Hidden };
+        show_overlay(st, vmax.is_some());
+    } else if vmax.is_some() && st.anim_start.is_some_and(|s| s.elapsed() < ANIM + Duration::from_millis(20)) {
+        show_overlay(st, true);
+    }
+}
+
 /// Chamado a cada ~15 ms durante o arraste.
 fn tick() {
     let release = STATE.with_borrow_mut(|st| {
@@ -531,6 +582,7 @@ fn tick() {
         let Some(drag) = st.drag.as_mut() else { return false };
         if drag.resizing {
             follow_resize(drag);
+            resize_vmax(st);
             return false;
         }
         let now = window_rect(drag.hwnd);
@@ -720,6 +772,7 @@ unsafe extern "system" fn win_event(
             });
             st.picked.clear();
             st.full = false;
+            st.vmax = None;
             st.mode = Mode::Hidden;
             st.work = RECT::default();
             unsafe { SetTimer(Some(st.overlay), TIMER_ID, 15, None) };
@@ -746,6 +799,14 @@ unsafe extern "system" fn win_event(
                 let full = std::mem::take(&mut st.full);
                 let span = st.span.take();
                 st.mode = Mode::Hidden;
+                let vmax = st.vmax.take();
+                if drag.hwnd == hwnd && drag.resizing && vmax.is_some() {
+                    // altura toda, mesma largura; arrastar depois volta à altura de antes
+                    let f = frame_rect(hwnd);
+                    let s = drag.start_frame;
+                    st.originals.entry(hwnd.0 as isize).or_insert((s.right - s.left, s.bottom - s.top));
+                    return Some(Some(RECT { left: f.left, right: f.right, top: st.work.top, bottom: st.work.bottom }));
+                }
                 if drag.hwnd != hwnd || !drag.moved || drag.resizing {
                     return None;
                 }

@@ -25,6 +25,7 @@ Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do curs
 - `Shift` durante o arraste: move sem encaixar.
 - Janela maximizada (pelo app ou pelo botão) pode ser arrastada pela barra de título: volta ao tamanho de antes de maximizar, como no snap do Windows.
 - Janela encaixada volta ao tamanho de antes do encaixe assim que começa a ser puxada; o arraste continua com ela já no tamanho original.
+- Redimensionar pela borda de cima até o topo da tela (ou pela de baixo até o fim) deixa a janela com a altura toda, mantendo largura e posição; arrastar depois volta à altura de antes.
 - Redimensionar uma janela pela borda lateral leva junto a vizinha que divide a mesma borda (50x50 → 25x75).
 - Menu do ícone: Pausar, Sair.
 
