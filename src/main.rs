@@ -152,6 +152,8 @@ struct State {
     mode: Mode,
     avail: Vec<bool>,
     full: bool, // soltar ocupa a área toda (borda de cima, ou notch no modo Alt)
+    /// encaixe pela borda: (x0, x1) em fração da área — metade ou o espaço que sobra
+    span: Option<(f64, f64)>,
     /// Tamanho (largura, altura) de cada janela antes de ser encaixada, para restaurar ao puxar.
     originals: HashMap<isize, (i32, i32)>,
     /// Janela cujo arraste foi encerrado para voltar ao tamanho original e recomeçar.
@@ -340,6 +342,37 @@ fn notch_rect(work: &RECT) -> RECT {
     }
 }
 
+/// Encaixe pela borda: metade, ou todo o espaço que sobra ao lado de uma janela de altura
+/// inteira já presa ao lado oposto (como o Windows). Devolve (x0, x1) em fração da área.
+fn edge_span(work: &RECT, skip: [HWND; 3], left_edge: bool) -> (f64, f64) {
+    const TOL: i32 = 10;
+    let w = (work.right - work.left) as f64;
+    let full_height = |f: &RECT| (f.top - work.top).abs() <= TOL && (f.bottom - work.bottom).abs() <= TOL;
+    let frames = visible_windows(skip);
+    let span = if left_edge {
+        // janelas presas à direita: ocupa até a borda esquerda da mais larga
+        frames
+            .iter()
+            .filter(|(_, f)| full_height(f) && (f.right - work.right).abs() <= TOL && f.left > work.left + TOL)
+            .map(|(_, f)| f.left)
+            .min()
+            .map(|b| (0.0, (b - work.left) as f64 / w))
+    } else {
+        frames
+            .iter()
+            .filter(|(_, f)| full_height(f) && (f.left - work.left).abs() <= TOL && f.right < work.right - TOL)
+            .map(|(_, f)| f.right)
+            .max()
+            .map(|b| ((b - work.left) as f64 / w, 1.0))
+    };
+    // sobra estreita demais não vale: fica a metade
+    match span {
+        Some((a, b)) if b - a >= 0.15 => (a, b),
+        _ if left_edge => (0.0, 0.5),
+        _ => (0.5, 1.0),
+    }
+}
+
 /// (retângulo do monitor, área de trabalho sem a barra de tarefas) sob o ponto.
 fn monitor_rects(pt: POINT) -> (RECT, RECT) {
     unsafe {
@@ -430,7 +463,14 @@ fn scene(st: &State) -> render::Scene {
             }
         }
     }
-    zones.extend(st.picked.iter().map(|&i| draw(i, true)));
+    zones.extend(st.picked.iter().map(|&i| {
+        let mut d = draw(i, true);
+        if let (Mode::Edge, Some((a, b))) = (st.mode, st.span) {
+            d.x0 = (a * w as f64).round() as f32;
+            d.x1 = (b * w as f64).round() as f32;
+        }
+        d
+    }));
     render::Scene {
         w,
         h,
@@ -525,6 +565,7 @@ fn tick() {
             }
         }
 
+        let drag_hwnd = drag.hwnd;
         let pt = drag_cursor();
         let (mon, work) = monitor_rects(pt);
         let new_monitor = work != st.work;
@@ -559,6 +600,9 @@ fn tick() {
         st.picked = picked;
         st.full = full;
         if target_changed {
+            st.span = (mode == Mode::Edge && st.picked.len() == 1).then(|| {
+                edge_span(&work, [drag_hwnd, st.overlay, st.tray], st.picked[0] == HALF_LEFT)
+            });
             st.anim_start = Some(Instant::now());
         }
         let animating = st.anim_start.is_some_and(|s| s.elapsed() < ANIM + Duration::from_millis(20));
@@ -700,6 +744,7 @@ unsafe extern "system" fn win_event(
                 show_overlay(st, false);
                 let picked = std::mem::take(&mut st.picked);
                 let full = std::mem::take(&mut st.full);
+                let span = st.span.take();
                 st.mode = Mode::Hidden;
                 if drag.hwnd != hwnd || !drag.moved || drag.resizing {
                     return None;
@@ -711,7 +756,9 @@ unsafe extern "system" fn win_event(
                     st.originals.remove(&key);
                     return Some(None);
                 }
-                let snap = if !picked.is_empty() {
+                let snap = if let Some((x0, x1)) = span.filter(|_| !picked.is_empty()) {
+                    Some(zone_rect(&st.work, x0, x1))
+                } else if !picked.is_empty() {
                     let x0 = picked.iter().map(|&i| ZONES[i].x0).fold(f64::MAX, f64::min);
                     let x1 = picked.iter().map(|&i| ZONES[i].x1).fold(f64::MIN, f64::max);
                     Some(zone_rect(&st.work, x0, x1))

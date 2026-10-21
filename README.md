@@ -6,8 +6,8 @@ Arrastando uma janela pela barra de título, nada aparece no meio da tela. Encos
 
 | Borda | Zona |
 | --- | --- |
-| esquerda | metade esquerda |
-| direita | metade direita |
+| esquerda | metade esquerda, ou todo o espaço que sobra ao lado de uma janela presa à direita |
+| direita | metade direita, ou todo o espaço que sobra ao lado de uma janela presa à esquerda |
 | cima | maximiza |
 
 Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do cursor escolhe:
