@@ -10,9 +10,9 @@
 
 mod render;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, BOOL, PCWSTR};
@@ -34,7 +34,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEINPUT, MOUSE_EVENT_FLAGS, VK_CONTROL, VK_MENU, VK_SHIFT,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS, VK_CONTROL, VK_LBUTTON, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -580,6 +580,77 @@ fn mouse(flags: MOUSE_EVENT_FLAGS) {
     unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
 }
 
+/// Janela de bandeja (recebe WM_UNMAXIMIZE) e pausa, lidos pelo gancho de mouse sem tocar no STATE.
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+static PAUSED: AtomicBool = AtomicBool::new(false);
+const WM_UNMAXIMIZE: u32 = WM_APP + 2;
+
+thread_local! {
+    /// botão apertado na barra de título de uma janela maximizada: (janela, ponto)
+    static PRESS: Cell<Option<(HWND, POINT)>> = const { Cell::new(None) };
+}
+
+/// Janela maximizada cuja barra de título está sob `pt`.
+fn maximized_caption(pt: POINT) -> Option<HWND> {
+    unsafe {
+        let root = GetAncestor(WindowFromPoint(pt), GA_ROOT);
+        if root.is_invalid() || !IsZoomed(root).as_bool() {
+            return None;
+        }
+        let mut hit = 0usize;
+        let lp = LPARAM(((pt.y as u16 as isize) << 16) | (pt.x as u16 as isize));
+        let ok = SendMessageTimeoutW(root, WM_NCHITTEST, WPARAM(0), lp, SMTO_ABORTIFHUNG, 100, Some(&mut hit));
+        (ok.0 != 0 && hit as u32 == HTCAPTION).then_some(root)
+    }
+}
+
+/// Com "Ajustar janelas" desligado o Windows não deixa arrastar janela maximizada. Este gancho
+/// percebe o arraste na barra de título e pede para a janela voltar ao tamanho de antes.
+unsafe extern "system" fn mouse_ll(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && !PAUSED.load(Ordering::Relaxed) {
+        let info = &*(lp.0 as *const MSLLHOOKSTRUCT);
+        if info.flags & LLMHF_INJECTED == 0 {
+            match wp.0 as u32 {
+                WM_LBUTTONDOWN => PRESS.set(maximized_caption(info.pt).map(|h| (h, info.pt))),
+                WM_LBUTTONUP => PRESS.set(None),
+                WM_MOUSEMOVE => {
+                    if let Some((h, p)) = PRESS.get() {
+                        let (dx, dy) = (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG));
+                        if (info.pt.x - p.x).abs() > dx || (info.pt.y - p.y).abs() > dy {
+                            PRESS.set(None);
+                            let tray = HWND(TRAY_HWND.load(Ordering::Relaxed) as *mut _);
+                            _ = PostMessageW(Some(tray), WM_UNMAXIMIZE, WPARAM(h.0 as usize), LPARAM(0));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    CallNextHookEx(None, code, wp, lp)
+}
+
+/// Restaura a janela maximizada sob o cursor, mantendo o ponto da barra, e recomeça o arraste.
+fn unmaximize_drag(hwnd: HWND) {
+    unsafe {
+        if !IsZoomed(hwnd).as_bool() || !key_down(VK_LBUTTON.0 as i32) {
+            return;
+        }
+        let max = frame_rect(hwnd);
+        let pt = drag_cursor();
+        let rel = ((pt.x - max.left) as f64 / (max.right - max.left).max(1) as f64).clamp(0.0, 1.0);
+        let dy = pt.y - max.top;
+        mouse(MOUSEEVENTF_LEFTUP);
+        _ = ShowWindow(hwnd, SW_RESTORE);
+        let f = frame_rect(hwnd);
+        let (w, h) = (f.right - f.left, f.bottom - f.top);
+        let left = pt.x - (rel * w as f64).round() as i32;
+        let top = pt.y - dy;
+        place(hwnd, RECT { left, top, right: left + w, bottom: top + h });
+        mouse(MOUSEEVENTF_LEFTDOWN);
+    }
+}
+
 unsafe extern "system" fn win_event(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -634,10 +705,13 @@ unsafe extern "system" fn win_event(
                     return None;
                 }
                 let key = hwnd.0 as isize;
-                let snap = if full {
-                    // ocupa a área toda sem o estado "maximizado", para continuar arrastável
-                    Some(st.work)
-                } else if !picked.is_empty() {
+                if full {
+                    // maximiza de verdade; o tamanho de antes fica com o próprio Windows
+                    // (arrastar a janela maximizada devolve esse tamanho: ver mouse_ll)
+                    st.originals.remove(&key);
+                    return Some(None);
+                }
+                let snap = if !picked.is_empty() {
                     let x0 = picked.iter().map(|&i| ZONES[i].x0).fold(f64::MAX, f64::min);
                     let x1 = picked.iter().map(|&i| ZONES[i].x1).fold(f64::MIN, f64::max);
                     Some(zone_rect(&st.work, x0, x1))
@@ -648,14 +722,16 @@ unsafe extern "system" fn win_event(
                     Some(t) => {
                         let f = drag.start_frame;
                         st.originals.entry(key).or_insert((f.right - f.left, f.bottom - f.top));
-                        Some(t)
+                        Some(Some(t))
                     }
                     // solta fora das zonas: volta ao tamanho de antes do encaixe
-                    None => st.originals.remove(&key).map(|size| restored_rect(hwnd, size, &st.work)),
+                    None => st.originals.remove(&key).map(|size| Some(restored_rect(hwnd, size, &st.work))),
                 }
             });
-            if let Some(t) = target {
-                place(hwnd, t);
+            match target {
+                Some(Some(t)) => place(hwnd, t),
+                Some(None) => unsafe { _ = ShowWindow(hwnd, SW_MAXIMIZE) },
+                None => {}
             }
         }
         _ => {}
@@ -706,6 +782,7 @@ fn tray_menu(hwnd: HWND) {
     match cmd {
         MENU_PAUSE => STATE.with_borrow_mut(|st| {
             st.paused = !st.paused;
+            PAUSED.store(st.paused, Ordering::Relaxed);
             unsafe { _ = Shell_NotifyIconW(NIM_MODIFY, &tray_data(st)) };
         }),
         MENU_QUIT => STATE.with_borrow(|st| unsafe {
@@ -743,6 +820,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        WM_UNMAXIMIZE => {
+            unmaximize_drag(HWND(wp.0 as *mut _));
+            LRESULT(0)
+        }
         WM_TIMER if wp.0 == TIMER_ID => {
             tick();
             LRESULT(0)
@@ -803,6 +884,9 @@ fn main() -> windows::core::Result<()> {
             st.gfx = Some(gfx);
             _ = Shell_NotifyIconW(NIM_ADD, &tray_data(st));
         });
+
+        TRAY_HWND.store(tray.0 as isize, Ordering::Relaxed);
+        let _mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll), Some(instance.into()), 0)?;
 
         let hook = SetWinEventHook(
             EVENT_SYSTEM_MOVESIZESTART,

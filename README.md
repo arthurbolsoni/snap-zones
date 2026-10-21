@@ -8,7 +8,7 @@ Arrastando uma janela pela barra de título, nada aparece no meio da tela. Encos
 | --- | --- |
 | esquerda | metade esquerda |
 | direita | metade direita |
-| cima | tela cheia (ocupa a área toda sem maximizar, continua arrastável) |
+| cima | maximiza |
 
 Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do cursor escolhe:
 
@@ -17,13 +17,14 @@ Segurando `Alt` durante o arraste aparecem todas as zonas, e a posição do curs
 | 1, 2, 3 | terços | sempre |
 | A | largura de um terço, centrada na divisa 1/2 (17%–50%) | 1 e 2 ocupados |
 | B | largura de um terço, centrada na divisa 2/3 (50%–83%) | 2 e 3 ocupados |
-| Tela cheia | notch no alto, ao centro | sempre |
+| Tela cheia | notch no alto, ao centro; maximiza | sempre |
 
 - Zonas sobrepostas: vence a de centro mais próximo do cursor; A e B ficam por cima dos terços.
 - Zona ocupada = janela visível encaixada nela, no mesmo monitor e na área de trabalho virtual atual.
 - `Ctrl` ao soltar (com `Alt`): ocupa duas colunas vizinhas.
 - `Shift` durante o arraste: move sem encaixar.
-- Janela encaixada (inclusive em tela cheia) volta ao tamanho de antes do encaixe assim que começa a ser puxada; o arraste continua com ela já no tamanho original.
+- Janela maximizada (pelo app ou pelo botão) pode ser arrastada pela barra de título: volta ao tamanho de antes de maximizar, como no snap do Windows.
+- Janela encaixada volta ao tamanho de antes do encaixe assim que começa a ser puxada; o arraste continua com ela já no tamanho original.
 - Redimensionar uma janela pela borda lateral leva junto a vizinha que divide a mesma borda (50x50 → 25x75).
 - Menu do ícone: Pausar, Sair.
 
