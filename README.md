@@ -2,7 +2,7 @@
 
 Encaixe de janelas para monitor ultrawide no Windows. Fica na bandeja do sistema.
 
-Arrastando uma janela pela barra de título, nada aparece no meio da tela. Encostando o cursor numa borda do monitor aparece só a zona daquela borda:
+Arrastando uma janela pela barra de título, nada aparece no meio da tela. Encostando o cursor numa borda da área de trabalho aparece só a zona daquela borda. A faixa de uma barra fixa na borda (AppBar, como a `barra` no topo) conta como borda: durante o arraste o Windows segura o cursor no pé dela.
 
 | Borda | Zona |
 | --- | --- |

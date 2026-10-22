@@ -80,7 +80,9 @@ enum Mode {
     All,
 }
 
-/// Distância do cursor até a borda do monitor para valer como "encostado".
+/// Distância do cursor até a borda da área de trabalho para valer como "encostado". A faixa de
+/// uma AppBar (a barra no topo) fica fora da área e conta como borda: durante o arraste o
+/// Windows segura o cursor no pé dela, sem chegar à borda do monitor.
 const EDGE: i32 = 2;
 
 const TIMER_ID: usize = 1;
@@ -599,11 +601,11 @@ fn resize_vmax(st: &mut State) {
     let (hwnd, start) = (drag.hwnd, drag.start_frame);
     let f = frame_rect(hwnd);
     let pt = drag_cursor();
-    let (mon, work) = monitor_rects(pt);
+    let work = monitor_work(pt);
     let at_edge = if f.top != start.top {
-        pt.y <= mon.top + EDGE
+        pt.y <= work.top + EDGE
     } else if f.bottom != start.bottom {
-        pt.y >= mon.bottom - 1 - EDGE
+        pt.y >= work.bottom - 1 - EDGE
     } else {
         false
     };
@@ -676,18 +678,19 @@ fn tick() {
         let (mode, picked, full) = if key_down(VK_SHIFT.0 as i32) {
             (Mode::Hidden, vec![], false)
         } else if key_down(VK_MENU.0 as i32) {
-            // Alt: todas as zonas, escolhe pela posição
-            if unsafe { PtInRect(&notch_rect(&work), pt).as_bool() } {
+            // Alt: todas as zonas, escolhe pela posição; o notch vale até o alto do monitor
+            let notch = RECT { top: mon.top, ..notch_rect(&work) };
+            if unsafe { PtInRect(&notch, pt).as_bool() } {
                 (Mode::All, vec![], true)
             } else {
                 let fx = ((pt.x - work.left) as f64 / (work.right - work.left) as f64).clamp(0.0, 1.0);
                 (Mode::All, pick(fx, key_down(VK_CONTROL.0 as i32), &st.avail), false)
             }
-        } else if pt.x <= mon.left + EDGE {
+        } else if pt.x <= work.left + EDGE {
             (Mode::Edge, vec![HALF_LEFT], false)
-        } else if pt.x >= mon.right - 1 - EDGE {
+        } else if pt.x >= work.right - 1 - EDGE {
             (Mode::Edge, vec![HALF_RIGHT], false)
-        } else if pt.y <= mon.top + EDGE {
+        } else if pt.y <= work.top + EDGE {
             (Mode::Edge, vec![], true)
         } else {
             (Mode::Hidden, vec![], false)

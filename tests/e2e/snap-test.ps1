@@ -1,13 +1,7 @@
 # Encaixa a janela de teste na borda esquerda e depois a puxa rápido: deve voltar a 900x600 e seguir.
 . "$PSScriptRoot\drag-lib.ps1"
 
-$p = Start-Process pwsh -ArgumentList "-NoProfile","-STA","-File","$PSScriptRoot/form.ps1","-Normal" -WindowStyle Minimized -PassThru
-$h = 0
-for ($k = 0; $k -lt 30 -and $h -eq 0; $k++) {
-  Start-Sleep -Milliseconds 300
-  $h = [T]::FindWindowW([NullString]::Value, "snaptest-janela")
-}
-
+$p, $h = OpenForm -Normal
 if (-not $h -or $h -eq 0) { "janela de teste não encontrada; abortando sem mexer no mouse"; Stop-Process -Id $p.Id -ErrorAction SilentlyContinue; exit 1 }
 Start-Sleep -Milliseconds 600
 State $h "inicial"
@@ -22,8 +16,8 @@ Start-Sleep -Milliseconds 400
 Start-Sleep -Milliseconds 500
 State $h "encaixada"
 
-# puxa de volta, rápido, pela barra de título
-[void][T]::SetCursorPos(640, 15)
+# puxa de volta, rápido, pela barra de título (abaixo da barra, se houver)
+[void][T]::SetCursorPos(640, (Monitor).work.T + 15)
 Start-Sleep -Milliseconds 200
 [T]::Btn(2)
 for ($k = 0; $k -lt 6; $k++) { [T]::Move(30, 20); Start-Sleep -Milliseconds 8 }
