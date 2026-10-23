@@ -23,12 +23,11 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
 };
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
@@ -92,6 +91,7 @@ const MENU_QUIT: usize = 2;
 const MENU_STARTUP: usize = 3;
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_VALUE: PCWSTR = w!("snap-zones");
+const TASK_NAME: &str = "snap-zones";
 #[derive(Default)]
 struct Drag {
     hwnd: HWND,
@@ -254,28 +254,76 @@ fn fullscreen(hwnd: HWND) -> bool {
     }
 }
 
-/// Liga ou desliga o início junto com o Windows (valor em HKCU\...\Run).
+/// Início junto com o Windows: tarefa agendada no logon com privilégio máximo. A chave Run
+/// sobe o app sem administrador, e aí ele não move janelas de programas elevados.
 fn startup_enabled() -> bool {
-    unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, None, None).is_ok()
-    }
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", TASK_NAME])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 fn set_startup(on: bool) {
-    unsafe {
-        let mut key = HKEY::default();
-        if RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None).is_err() {
+    let args = if on {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let user = format!(
+            "{}\\{}",
+            std::env::var("USERDOMAIN").unwrap_or_default(),
+            std::env::var("USERNAME").unwrap_or_default()
+        );
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>"{exe}"</Command></Exec></Actions>
+</Task>
+"#,
+            exe = exe.display()
+        );
+        let path = std::env::temp_dir().join("snap-zones-task.xml");
+        let bytes: Vec<u8> = [0xFEFFu16].into_iter().chain(xml.encode_utf16()).flat_map(u16::to_le_bytes).collect();
+        if std::fs::write(&path, bytes).is_err() {
             return;
         }
-        if on {
-            let Ok(exe) = std::env::current_exe() else { return };
-            let cmd: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain([0]).collect();
-            let bytes = std::slice::from_raw_parts(cmd.as_ptr() as *const u8, cmd.len() * 2);
-            _ = RegSetValueExW(key, RUN_VALUE, None, REG_SZ, Some(bytes));
-        } else {
-            _ = RegDeleteValueW(key, RUN_VALUE);
+        format!("/Create /F /TN {TASK_NAME} /XML \"{}\"", path.display())
+    } else {
+        format!("/Delete /F /TN {TASK_NAME}")
+    };
+    // criar tarefa com privilégio máximo exige administrador: pede o UAC se o app não for
+    let params: Vec<u16> = args.encode_utf16().chain([0]).collect();
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: w!("runas"),
+        lpFile: w!("schtasks.exe"),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    unsafe {
+        if ShellExecuteExW(&mut sei).is_ok() && !sei.hProcess.is_invalid() {
+            WaitForSingleObject(sei.hProcess, 10_000);
+            _ = CloseHandle(sei.hProcess);
         }
-        _ = RegCloseKey(key);
+    }
+    _ = std::fs::remove_file(std::env::temp_dir().join("snap-zones-task.xml"));
+    // a versão antiga usava a chave Run
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, None, KEY_SET_VALUE, &mut key).is_ok() {
+            _ = RegDeleteValueW(key, RUN_VALUE);
+            _ = RegCloseKey(key);
+        }
     }
 }
 
